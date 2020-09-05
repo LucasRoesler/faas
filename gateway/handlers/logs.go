@@ -110,6 +110,9 @@ func (u *unbufferedWriter) Write(p []byte) (n int, err error) {
 	log.Printf("LogProxy: writing %q", p)
 	n, err = u.dst.Write(p)
 	u.dst.Flush()
+	_, _ = u.dst.Write([]byte(`{"name":"nodeinfo","namespace":"openfaas-fn","timestamp":"%s", "text": "debug, soso"}`))
+	_, _ = u.dst.Write([]byte("\n"))
+	u.dst.Flush()
 
 	return n, err
 }
