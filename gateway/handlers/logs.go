@@ -39,14 +39,14 @@ func NewLogHandlerFunc(logProvider url.URL, timeout time.Duration) http.HandlerF
 
 		cn, ok := w.(http.CloseNotifier)
 		if !ok {
-			log.Println("LogHandler: response is not a CloseNotifier, required for streaming response")
+			log.Println("LogProxy: response is not a CloseNotifier, required for streaming response")
 			http.NotFound(w, r)
 			return
 		}
 
 		wf, ok := w.(writerFlusher)
 		if !ok {
-			log.Println("LogHandler: response is not a Flusher, required for streaming response")
+			log.Println("LogProxy: response is not a Flusher, required for streaming response")
 			http.NotFound(w, r)
 			return
 		}
@@ -88,6 +88,7 @@ func NewLogHandlerFunc(logProvider url.URL, timeout time.Duration) http.HandlerF
 			http.Error(w, fmt.Sprintf("unknown log request error (%v)", logResp.StatusCode), http.StatusInternalServerError)
 		}
 
+		log.Printf("LogProxy: done")
 		return
 	}
 }
@@ -106,6 +107,7 @@ type unbufferedWriter struct {
 
 // Write writes to the dst writer and then immediately flushes the writer
 func (u *unbufferedWriter) Write(p []byte) (n int, err error) {
+	log.Printf("LogProxy: writing %q", p)
 	n, err = u.dst.Write(p)
 	u.dst.Flush()
 
