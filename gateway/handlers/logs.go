@@ -67,6 +67,8 @@ func NewLogHandlerFunc(logProvider url.URL, timeout time.Duration) http.HandlerF
 		}
 		defer logResp.Body.Close()
 
+		copyHeaders(w.Header(), &logResp.Header)
+
 		switch logResp.StatusCode {
 		case http.StatusNotFound, http.StatusNotImplemented:
 			w.WriteHeader(http.StatusNotImplemented)
