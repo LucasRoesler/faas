@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/openfaas/faas/gateway/pkg/middleware"
-	"github.com/openfaas/faas/gateway/types"
 )
 
 // functionMatcher parses out the service name (group 1) and rest of path (group 2).
@@ -39,8 +38,14 @@ type URLPathTransformer interface {
 	Transform(r *http.Request) string
 }
 
+// HTTPClient is the minimal http client interface required for the forwarding proxy
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+	Timeout() time.Duration
+}
+
 // MakeForwardingProxyHandler create a handler which forwards HTTP requests
-func MakeForwardingProxyHandler(proxy *types.HTTPClientReverseProxy,
+func MakeForwardingProxyHandler(proxy HTTPClient,
 	notifiers []HTTPNotifier,
 	baseURLResolver BaseURLResolver,
 	urlPathTransformer URLPathTransformer,
@@ -49,6 +54,10 @@ func MakeForwardingProxyHandler(proxy *types.HTTPClientReverseProxy,
 	writeRequestURI := false
 	if _, exists := os.LookupEnv("write_request_uri"); exists {
 		writeRequestURI = exists
+	}
+
+	if urlPathTransformer == nil {
+		urlPathTransformer = TransparentURLPathTransformer{}
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +71,7 @@ func MakeForwardingProxyHandler(proxy *types.HTTPClientReverseProxy,
 
 		start := time.Now()
 
-		statusCode, err := forwardRequest(w, r, proxy.Client, baseURL, requestURL, proxy.Timeout, writeRequestURI, serviceAuthInjector)
+		statusCode, err := forwardRequest(w, r, proxy, baseURL, requestURL, proxy.Timeout(), writeRequestURI, serviceAuthInjector)
 
 		seconds := time.Since(start)
 		if err != nil {
@@ -104,7 +113,7 @@ func buildUpstreamRequest(r *http.Request, baseURL string, requestURL string) *h
 
 func forwardRequest(w http.ResponseWriter,
 	r *http.Request,
-	proxyClient *http.Client,
+	proxyClient HTTPClient,
 	baseURL string,
 	requestURL string,
 	timeout time.Duration,
@@ -214,6 +223,16 @@ func (f TransparentURLPathTransformer) Transform(r *http.Request) string {
 	return r.URL.Path
 }
 
+// NATSResolver returns the service name compatible with the
+// NATS RoundTripper implementation. This is `faas.<name>`.
+// Implements BaseURLResolver
+type NATSResolver struct {
+}
+
+func (f NATSResolver) Resolve(r *http.Request) string {
+	return fmt.Sprintf("faas.%s", getServiceName(r.URL.Path))
+}
+
 // FunctionPrefixTrimmingURLPathTransformer removes the "/function/servicename/" prefix from the URL path.
 type FunctionPrefixTrimmingURLPathTransformer struct {
 }
@@ -229,8 +248,30 @@ func (f FunctionPrefixTrimmingURLPathTransformer) Transform(r *http.Request) str
 		// upstream request.  In the following regex, in the case of a match
 		// the r.URL.Path will be at `0`, the function name at `1` and the
 		// rest of the path (the part we are interested in) at `2`.
-		matcher := functionMatcher.Copy()
-		parts := matcher.FindStringSubmatch(ret)
+		parts := functionMatcher.FindStringSubmatch(ret)
+		if len(parts) == hasPathCount {
+			ret = parts[pathIndex]
+		}
+	}
+
+	return ret
+}
+
+// NATSTransportName returns the path transformed in function.<name>/.*
+type NATSTransportName struct{}
+
+// Transform removes the "/function/servicename/" prefix from the URL path.
+func (f NATSTransportName) Transform(r *http.Request) string {
+	ret := r.URL.Path
+
+	if ret != "" {
+		// When forwarding to a function, since the `/function/xyz` portion
+		// of a path like `/function/xyz/rest/of/path` is only used or needed
+		// by the Gateway, we want to trim it down to `/rest/of/path` for the
+		// upstream request.  In the following regex, in the case of a match
+		// the r.URL.Path will be at `0`, the function name at `1` and the
+		// rest of the path (the part we are interested in) at `2`.
+		parts := functionMatcher.FindStringSubmatch(ret)
 		if len(parts) == hasPathCount {
 			ret = parts[pathIndex]
 		}

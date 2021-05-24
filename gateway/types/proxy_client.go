@@ -4,22 +4,25 @@
 package types
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"time"
+
+	nrt "github.com/ripienaar/nats-roundtripper"
 )
 
 // NewHTTPClientReverseProxy proxies to an upstream host through the use of a http.Client
 func NewHTTPClientReverseProxy(baseURL *url.URL, timeout time.Duration, maxIdleConns, maxIdleConnsPerHost int) *HTTPClientReverseProxy {
 	h := HTTPClientReverseProxy{
-		BaseURL: baseURL,
-		Timeout: timeout,
+		timeout: timeout,
 	}
 
-	h.Client = http.DefaultClient
-	h.Timeout = timeout
-	h.Client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	h.client = http.DefaultClient
+	h.timeout = timeout
+	h.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 
@@ -31,7 +34,7 @@ func NewHTTPClientReverseProxy(baseURL *url.URL, timeout time.Duration, maxIdleC
 	// https://github.com/minio/minio/pull/5860
 
 	// Taken from http.DefaultTransport in Go 1.11
-	h.Client.Transport = &http.Transport{
+	h.client.Transport = &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   timeout,
@@ -48,9 +51,42 @@ func NewHTTPClientReverseProxy(baseURL *url.URL, timeout time.Duration, maxIdleC
 	return &h
 }
 
+// NewNATSTransportClientReverseProxy creates a new HTTP CLient ReverseProxy that utilizes the NATS RoundTripper for the transit layer.
+func NewNATSTransportClientReverseProxy(baseURL *url.URL, timeout time.Duration, address string, port int) *HTTPClientReverseProxy {
+	h := HTTPClientReverseProxy{
+		timeout: timeout,
+	}
+
+	h.client = http.DefaultClient
+	h.timeout = timeout
+	h.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	h.client.Transport = nrt.Must(
+		nrt.WithNatsServer(
+			fmt.Sprintf("%s:%d", address, port),
+		),
+		nrt.WithPrefix("faas"),
+	)
+
+	return &h
+}
+
 // HTTPClientReverseProxy proxy to a remote BaseURL using a http.Client
 type HTTPClientReverseProxy struct {
-	BaseURL *url.URL
-	Client  *http.Client
-	Timeout time.Duration
+	client  *http.Client
+	timeout time.Duration
+}
+
+// Do executes the request with the configured timeout
+func (c HTTPClientReverseProxy) Do(req *http.Request) (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(req.Context(), c.Timeout())
+	defer cancel()
+
+	return c.client.Do(req.WithContext(ctx))
+}
+
+func (c HTTPClientReverseProxy) Timeout() time.Duration {
+	return c.timeout
 }

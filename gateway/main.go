@@ -108,21 +108,31 @@ func main() {
 	forwardingNotifiers := []handlers.HTTPNotifier{loggingNotifier, prometheusServiceNotifier}
 
 	urlResolver := handlers.SingleHostBaseURLResolver{BaseURL: config.FunctionsProviderURL.String()}
-	var functionURLResolver handlers.BaseURLResolver
-	var functionURLTransformer handlers.URLPathTransformer
-	nilURLTransformer := handlers.TransparentURLPathTransformer{}
 	trimURLTransformer := handlers.FunctionPrefixTrimmingURLPathTransformer{}
 
-	if config.DirectFunctions {
+	var functionProxyCLient *types.HTTPClientReverseProxy = reverseProxy
+	var functionURLResolver handlers.BaseURLResolver = urlResolver
+	var functionURLTransformer handlers.URLPathTransformer = nil
+
+	switch {
+	case config.UseNATS():
+		functionProxyCLient = types.NewNATSTransportClientReverseProxy(
+			config.FunctionsProviderURL,
+			config.UpstreamTimeout,
+			*config.NATSAddress,
+			*config.NATSPort,
+		)
+		functionURLResolver = handlers.NATSResolver{}
+	case config.DirectFunctions:
 		functionURLResolver = handlers.FunctionAsHostBaseURLResolver{
 			FunctionSuffix:    config.DirectFunctionsSuffix,
 			FunctionNamespace: config.Namespace,
 		}
 		functionURLTransformer = trimURLTransformer
-	} else {
-		functionURLResolver = urlResolver
-		functionURLTransformer = nilURLTransformer
 	}
+	faasHandlers.Proxy = handlers.MakeCallIDMiddleware(
+		handlers.MakeForwardingProxyHandler(functionProxyCLient, functionNotifiers, functionURLResolver, functionURLTransformer, nil),
+	)
 
 	var serviceAuthInjector middleware.AuthInjector
 
@@ -132,20 +142,16 @@ func main() {
 
 	decorateExternalAuth := handlers.MakeExternalAuthHandler
 
-	faasHandlers.Proxy = handlers.MakeCallIDMiddleware(
-		handlers.MakeForwardingProxyHandler(reverseProxy, functionNotifiers, functionURLResolver, functionURLTransformer, nil),
-	)
+	faasHandlers.ListFunctions = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)
+	faasHandlers.DeployFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)
+	faasHandlers.DeleteFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)
+	faasHandlers.UpdateFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)
+	faasHandlers.QueryFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)
 
-	faasHandlers.ListFunctions = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)
-	faasHandlers.DeployFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)
-	faasHandlers.DeleteFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)
-	faasHandlers.UpdateFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)
-	faasHandlers.QueryFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)
+	faasHandlers.InfoHandler = handlers.MakeInfoHandler(handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector))
+	faasHandlers.SecretHandler = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)
 
-	faasHandlers.InfoHandler = handlers.MakeInfoHandler(handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector))
-	faasHandlers.SecretHandler = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)
-
-	faasHandlers.NamespaceListerHandler = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)
+	faasHandlers.NamespaceListerHandler = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)
 
 	externalServiceQuery := plugin.NewExternalServiceQuery(*config.FunctionsProviderURL, serviceAuthInjector)
 	faasHandlers.Alert = handlers.MakeNotifierWrapper(
@@ -198,7 +204,7 @@ func main() {
 
 	prometheusQuery := metrics.NewPrometheusQuery(config.PrometheusHost, config.PrometheusPort, &http.Client{})
 	faasHandlers.ListFunctions = metrics.AddMetricsHandler(faasHandlers.ListFunctions, prometheusQuery)
-	faasHandlers.ScaleFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)
+	faasHandlers.ScaleFunction = handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)
 
 	if credentials != nil {
 		faasHandlers.Alert =
@@ -275,7 +281,7 @@ func main() {
 	go runMetricsServer(ctx)
 
 	r.HandleFunc("/healthz",
-		handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)).Methods(http.MethodGet)
+		handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nil, serviceAuthInjector)).Methods(http.MethodGet)
 
 	r.Handle("/", http.RedirectHandler("/ui/", http.StatusMovedPermanently)).Methods(http.MethodGet)
 
