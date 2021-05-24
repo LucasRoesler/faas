@@ -4,9 +4,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -19,12 +22,24 @@ import (
 	"github.com/openfaas/faas/gateway/types"
 	"github.com/openfaas/faas/gateway/version"
 	natsHandler "github.com/openfaas/nats-queue-worker/handler"
+
+	ofhttp "github.com/openfaas/faas/gateway/pkg/http"
 )
 
 // NameExpression for a function / service
 const NameExpression = "-a-zA-Z_0-9."
 
 func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		sig := <-c
+		log.Printf("Received %s signal. Terminating...", sig.String())
+		cancel()
+	}()
+
 	if len(version.GitCommitMessage) == 0 {
 		version.GitCommitMessage = "See GitHub for latest changes"
 	}
@@ -257,7 +272,7 @@ func main() {
 	}
 
 	//Start metrics server in a goroutine
-	go runMetricsServer()
+	go runMetricsServer(ctx)
 
 	r.HandleFunc("/healthz",
 		handlers.MakeForwardingProxyHandler(reverseProxy, forwardingNotifiers, urlResolver, nilURLTransformer, serviceAuthInjector)).Methods(http.MethodGet)
@@ -274,12 +289,12 @@ func main() {
 		Handler:        r,
 	}
 
-	log.Fatal(s.ListenAndServe())
+	log.Fatal(ofhttp.ListenAndServe(ctx, s))
 }
 
 //runMetricsServer Listen on a separate HTTP port for Prometheus metrics to keep this accessible from
 // the internal network only.
-func runMetricsServer() {
+func runMetricsServer(ctx context.Context) {
 	metricsHandler := metrics.PrometheusHandler()
 	router := mux.NewRouter()
 	router.Handle("/metrics", metricsHandler)
@@ -297,5 +312,5 @@ func runMetricsServer() {
 		Handler:        router,
 	}
 
-	log.Fatal(s.ListenAndServe())
+	log.Fatal(ofhttp.ListenAndServe(ctx, s))
 }
